@@ -19,6 +19,7 @@ import random
 import requests
 import re
 import fitz  # PyMuPDF
+import shutil
 
 # --- PDF and File Utilities ---
 def extract_cpf(file):
@@ -336,3 +337,123 @@ def timings_report(start_time, total_start_time,timings):
     timings.append(elapsed)
     total_elapsed = time.time() - total_start_time
     average_elapsed = sum(timings) / len(timings)
+
+# --- For Docker ---
+def load_cnpjs(filename):
+    with open(filename, encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip()]
+
+def batch_cnpjs(cnpj_list, batch_size):
+    for i in range(0, len(cnpj_list), batch_size):
+        yield cnpj_list[i:i+batch_size]
+
+def scrape_single_cnpj(
+        
+    cnpj,
+    chrome_profile_path,
+    url,
+    url_inside,
+    master_df,
+    master_debt_df,
+    timings,
+    total_start_time
+):
+    start_time = time.time()
+    data = []
+    # Set up Chrome options
+    if os.path.exists(chrome_profile_path):
+        shutil.rmtree(chrome_profile_path)
+
+    try:
+        autogui_open_page(chrome_profile_path, url, cnpj)
+        driver, wait = selenium_open_page(url_inside)
+        cnpj_check(driver, cnpj)
+
+        try:
+            enabled_years, use_bootstrap = get_enabled_years_bootstrap(wait, cnpj)
+        except Exception:
+            print("Bootstrap dropdown failed, falling back to native <select> method.")
+            enabled_years, use_bootstrap = get_enabled_years_native(wait, cnpj, driver)
+
+        print("scraping years", enabled_years)
+        enabled_years.insert(0, "2010")
+
+        obtained_pdf = 0
+        for index, year in enumerate(enabled_years):
+            try:
+                if use_bootstrap:
+                    select_year_bootstrap(wait, driver, year)
+                else:
+                    select_year_native(driver, year)
+
+                ok_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+                ok_button.click()
+                time.sleep(2)
+
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                table = soup.find('table', class_='table table-hover table-condensed emissao is-detailed')
+                if not table:
+                    master_df = handle_missing_table(cnpj, year, enabled_years, index, data, master_df)
+                    break  # Exit the year loop
+
+                is_debt_collector = debt_collector(soup)
+                new_data = scrape_data(cnpj, year, soup, table)
+                master_df = pd.concat([master_df, new_data], ignore_index=True)
+
+                if is_debt_collector:
+                    print(f"Debt collection table found in year {year}.")
+                    debt_data = scrape_debt_table(cnpj, soup)
+                    master_debt_df = pd.concat([master_debt_df, debt_data], ignore_index=True)
+
+                outstanding_payments = outstanding_payment(new_data)
+
+                if not is_debt_collector and outstanding_payments and not obtained_pdf:
+                    print(f"Outstanding payments found in year {year}, period {outstanding_payments}, attempting to obtain PDF.")
+                    obtain_pdf(driver, wait, outstanding_payments)
+                    driver.back()
+                    obtained_pdf = 1
+
+                driver.back()
+                time.sleep(2)
+
+            except Exception as e:
+                print(f"Error with year {year}:", e)
+
+    except Exception as outer_error:
+        print(f"Fatal error with CNPJ {cnpj}:", outer_error)
+
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
+        kill_chrome()
+        timings_report(start_time, total_start_time, timings)
+
+    return master_df, master_debt_df
+
+def process_cnpj_batch(
+    cnpj_batch,
+    chrome_profile_path,
+    url,
+    url_inside,
+    timings,
+    total_start_time
+):
+    import pandas as pd
+    master_df = pd.DataFrame()
+    master_debt_df = pd.DataFrame()
+    for cnpj in cnpj_batch:
+        master_df, master_debt_df = scrape_single_cnpj(
+            cnpj,
+            chrome_profile_path,
+            url,
+            url_inside,
+            master_df,
+            master_debt_df,
+            timings,
+            total_start_time
+        )
+    return master_df, master_debt_df
+
+

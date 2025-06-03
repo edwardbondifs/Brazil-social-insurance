@@ -21,26 +21,30 @@ import re
 import fitz  # PyMuPDF
 
 #Extract CPF and CNPJ from PDF
-def extract_cpf():
-    # Load the PDF
-    doc = fitz.open("C:/Users/edward_b/Downloads/DAS-PGMEI-28740844000198-AC2020.pdf")
+def extract_cpf(file):
+    try: 
+        # Load the PDF
+        doc = fitz.open(file)
 
-    # Extract text from all pages
-    text = ""
-    for page in doc:
-        text += page.get_text() 
+        # Extract text from all pages
+        text = ""
+        for page in doc:
+            text += page.get_text() 
 
 
-    cnpj = text.split("\n")[2]
-    cpf_match = re.search(r"CPF[:\s]*([\d.-]+)", text)
+        cnpj = text.split("\n")[2]
+        cpf_match = re.search(r"CPF[:\s]*([\d.-]+)", text)
 
-    cnpj = re.sub(r'\D', '', cnpj)
-    cpf = re.sub(r'\D', '', cpf_match.group(1)) if cpf_match else None
+        cnpj = re.sub(r'\D', '', cnpj)
+        cpf = re.sub(r'\D', '', cpf_match.group(1)) if cpf_match else None
 
-    return cnpj, cpf
-    
+        return cnpj, cpf
+    except Exception as e: 
+        print(f"Error extracting CPF/CNPJ from PDF: {e}")
+        return None, None 
 
-   
+        
+
 
 # Function to kill Chrome processes
 def kill_chrome():
@@ -61,6 +65,37 @@ def cnpj_check(driver, cnpj):
     print(f"cnpj: {cnpj}")
     if cnpj_check != cnpj:
         raise ValueError(f"CNPJ mismatch: expected {cnpj}, found {cnpj_check}")
+
+# Obtain PDF
+def obtain_pdf(driver, wait, period):
+    try:
+        # Select December checkbox
+        checkbox = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, f'input[name="pa"][value$="{period}"]')
+        ))
+        driver.execute_script("arguments[0].click();", checkbox)
+        print("✔️ December checkbox selected for 2025")
+
+        time.sleep(1)
+
+        # Click Apurar / DAS button
+        das_button = wait.until(EC.element_to_be_clickable((By.ID, "btnEmitirDas")))
+        driver.execute_script("arguments[0].click();", das_button)
+        print("✔️ Apurar / DAS button clicked for 2025")
+
+        time.sleep(2)
+
+        # Click Imprimir/Visualizar PDF
+        try:
+            pdf_link = wait.until(EC.element_to_be_clickable(
+                (By.XPATH, '//a[contains(@href, "/pgmei.app/emissao/imprimir")]')
+            ))
+            driver.execute_script("arguments[0].click();", pdf_link)
+            print("✔️ PDF print view opened")
+        except Exception as e:
+            print(f"❌ Failed to click PDF print button: {e}")
+    except Exception as e:
+        print(f"❌ Error obtaining PDF: {e}")
     
 
 #Scrape MEI tables
@@ -147,4 +182,48 @@ def scrape_data(cnpj, year, soup, table):
 
     return df
 
+def debt_collector(soup):
+    # Placeholder for debt collector logic.
+    # if soup contains ATENÇÃO: Existe(m) débitos(s) enviados(s) para inscrição em dívida ativa.then return True
+    attention_text = soup.find(text=re.compile(r"ATENÇÃO: Existe\(m\) débitos\(s\) enviados\(s\) para inscrição em dívida ativa"))
+    if attention_text:
+        return True
+    return False
 
+
+def outstanding_payment(data):
+    mask = data['Total'].astype(str).str.strip().ne("-")
+    if mask.any():
+        first = mask.idxmax()
+        month = first + 1
+        return f"{month:02d}"
+    return None
+
+def scrape_debt_table(cnpj, soup):
+    all_rows = []
+    table = soup.find_all("table", class_="table table-bordered table-hover table-condensed")
+    for tbl in table:
+        # Get the period from the caption
+        caption = tbl.find("caption")
+        periodo = caption.get_text(strip=True).replace("Período de Apuração (PA): ", "") if caption else None
+
+        # Get all rows in tbody
+        for tbody in tbl.find_all("tbody"):
+            for tr in tbody.find_all("tr"):
+                tds = tr.find_all("td")
+                if len(tds) == 4:
+                    tributo = tds[0].get_text(strip=True)
+                    valor = tds[1].get_text(strip=True)
+                    ente = tds[2].get_text(strip=True)
+                    situacao = tds[3].get_text(strip=True)
+                    all_rows.append({
+                        "Periodo de Apuracao": periodo,
+                        "Tributo": tributo,
+                        "Valor": valor,
+                        "Ente Federado": ente,
+                        "Situacao do Debito": situacao
+                    })
+    df = pd.DataFrame(all_rows)
+    df["cnpj"] = cnpj
+    return df
+    

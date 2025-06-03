@@ -4,11 +4,5 @@ pyautogui
 beautifulsoup4
 requests
 matplotlib
-logging
 psutil
 PyMuPDF
-os-sys  # os and sys are standard, but included for clarity if needed
-time    # standard library, not required in requirements.txt
-subprocess  # standard library, not required in requirements.txt
-random   # standard library, not required in requirements.txt
-re       # standard library, not required in requirements.txt

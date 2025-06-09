@@ -6,3 +6,5 @@ requests
 matplotlib
 psutil
 PyMuPDF
+celery[redis]
+redis

@@ -21,8 +21,6 @@ import re
 import fitz  # PyMuPDF 
 import shutil 
 import undetected_chromedriver as uc 
-from playwright.sync_api import sync_playwright 
-from playwright_stealth import stealth_sync 
 
 # --- PDF and File Utilities --- 
 def extract_cpf(file): 
@@ -46,7 +44,7 @@ def extract_cpf(file):
         print(f"Error extracting CPF/CNPJ from PDF: {e}") 
         return None, None 
 
- # Obtain PDF 
+# Obtain PDF 
 def obtain_pdf(driver, wait, period): 
     try: 
         # Select December checkbox 
@@ -108,16 +106,51 @@ def autogui_open_page(chrome_profile_path, url, cnpj):
         pyautogui.press('enter')   
         time.sleep(4) 
 
-        pyautogui.moveTo(x=1027, y=377 , duration=1) # laptop x=671, y=490  deksptop : x=1027, y=377 
-        pyautogui.click() 
-        pyautogui.typewrite(cnpj, interval=0.1) 
+        #pyautogui.moveTo(x=1027, y=377 , duration=1) # laptop x=671, y=490  deksptop : x=1027, y=377 
+        #pyautogui.click() 
+        pyautogui.typewrite(cnpj, interval=0.1)
+        pyautogui.press('enter')
 
-        pyautogui.moveTo(x=1027, y=500, duration=1) # Laptop x=675, y=630 desktop: x=1027, y=500 
-        pyautogui.click() 
+        #pyautogui.moveTo(x=1027, y=500, duration=1) # Laptop x=675, y=630 desktop: x=1027, y=500 
+        #pyautogui.click() 
         time.sleep(2) 
     except Exception as e: 
         print(f"Error opening page with pyautogui: {e}") 
         return False 
+def selenium_open_page_and_login(chrome_profile_path, url, cnpj):
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import time
+
+    options = Options()
+    options.add_argument(f"--user-data-dir={chrome_profile_path}")
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    # options.add_argument("--headless")  # Uncomment for headless mode
+
+    driver = webdriver.Chrome(options=options)
+    wait = WebDriverWait(driver, 10)
+
+    driver.get(url)
+    # Wait for the CNPJ input to be present
+    wait.until(EC.presence_of_element_located((By.NAME, "cnpj")))
+    cnpj_input = driver.find_element(By.NAME, "cnpj")
+    cnpj_input.clear()
+    cnpj_input.send_keys(cnpj)
+
+    # Wait for the "Continuar" button to be enabled and click it
+    continuar_btn = wait.until(EC.element_to_be_clickable((By.ID, "continuar")))
+    continuar_btn.click()
+
+    # Wait for navigation or next page to load as needed
+    time.sleep(2)
+    return driver, wait
 def selenium_open_page(url_inside): 
 
     # Selenium setup 
@@ -140,8 +173,8 @@ def remove_chrome_profile_dir(path, retries=0, delay=2):
             e = exc 
             print(f"Retrying removal of {path} due to: {e}") 
             time.sleep(delay)
-    if e is not None: 
-        print(f"Failed to remove {path} after {retries} attempts: {e}") 
+        if e is not None: 
+            print(f"Failed to remove {path} after {retries} attempts: {e}") 
 
 # --- Scraping Utilities --- 
 def cnpj_check(driver, cnpj): 
@@ -274,7 +307,7 @@ def scrape_debt_table(cnpj, soup):
     df = pd.DataFrame(all_rows) 
     df["cnpj"] = cnpj 
     return df 
-  
+
 # --- Dropdown and Year Selection --- 
 def get_enabled_years_bootstrap(wait, cnpj): 
     """ 
@@ -363,13 +396,13 @@ def queue_cnpj_batches(cnpj_list, batch_size=10):
     """Queue CNPJ batches as Celery tasks.""" 
     for batch in batch_cnpjs(cnpj_list, batch_size): 
         process_cnpj_batch_task.delay(batch) 
-def process_cnpj_batch(cnpj_batch): 
+def process_cnpj_batch(chrome_profile_path, cnpj): 
     import os 
     import pandas as pd 
     import time 
     import shutil 
 
-    chrome_profile_path = "C:/Temp/ChromeDebug" 
+    #chrome_profile_path = "C:/Temp/ChromeDebug" 
     url = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/Identificacao" 
     url_inside = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao" 
     timings = [] 
@@ -377,100 +410,111 @@ def process_cnpj_batch(cnpj_batch):
     master_df = pd.DataFrame() 
     master_debt_df = pd.DataFrame() 
 
-    for cnpj in cnpj_batch: 
+    #for cnpj in cnpj_batch: 
+    try: 
+        start_time = time.time() 
+        data = [] 
+
+
+        #autogui_open_page(chrome_profile_path, url, cnpj) 
+        #selenium_open_page_and_login(chrome_profile_path, url, cnpj)
+        driver, wait = selenium_open_page(url_inside) 
+
+        #cnpj_check(driver, cnpj) 
+
         try: 
-            start_time = time.time() 
-            data = [] 
+            enabled_years, use_bootstrap = get_enabled_years_bootstrap(wait, cnpj) 
+        except Exception: 
+            print("Bootstrap dropdown failed, falling back to native <select> method.") 
+            enabled_years, use_bootstrap = get_enabled_years_native(wait, cnpj, driver) 
 
+        # include only max of enabled years
+        enabled_years = [max(enabled_years)] 
+        print("scraping years", enabled_years) 
+        enabled_years.insert(0, "2010") 
 
-            autogui_open_page(chrome_profile_path, url, cnpj) 
-            driver, wait = selenium_open_page(url_inside) 
-
-            cnpj_check(driver, cnpj) 
-
+        obtained_pdf = 0 
+        for index, year in enumerate(enabled_years): 
             try: 
-                enabled_years, use_bootstrap = get_enabled_years_bootstrap(wait, cnpj) 
-            except Exception: 
-                print("Bootstrap dropdown failed, falling back to native <select> method.") 
-                enabled_years, use_bootstrap = get_enabled_years_native(wait, cnpj, driver) 
+                if use_bootstrap: 
+                    select_year_bootstrap(wait, driver, year) 
+                else: 
+                    select_year_native(driver, year) 
 
-            print("scraping years", enabled_years) 
-            enabled_years.insert(0, "2010") 
+                ok_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']") 
+                ok_button.click() 
+                time.sleep(2) 
 
-            obtained_pdf = 0 
-            for index, year in enumerate(enabled_years): 
-                try: 
-                    if use_bootstrap: 
-                        select_year_bootstrap(wait, driver, year) 
-                    else: 
-                        select_year_native(driver, year) 
+                soup = BeautifulSoup(driver.page_source, 'html.parser') 
+                table = soup.find('table', class_='table table-hover table-condensed emissao is-detailed') 
+                if not table: 
+                    master_df = handle_missing_table(cnpj, year, enabled_years, index, data, master_df) 
+                    break 
 
-                    ok_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']") 
-                    ok_button.click() 
-                    time.sleep(2) 
+                is_debt_collector = debt_collector(soup) 
+                new_data = scrape_data(cnpj, year, soup, table) 
+                master_df = pd.concat([master_df, new_data], ignore_index=True) 
 
-                    soup = BeautifulSoup(driver.page_source, 'html.parser') 
-                    table = soup.find('table', class_='table table-hover table-condensed emissao is-detailed') 
-                    if not table: 
-                        master_df = handle_missing_table(cnpj, year, enabled_years, index, data, master_df) 
-                        break 
+                if is_debt_collector: 
+                    print(f"Debt collection table found in year {year}.") 
+                    debt_data = scrape_debt_table(cnpj, soup) 
+                    master_debt_df = pd.concat([master_debt_df, debt_data], ignore_index=True) 
 
-                    is_debt_collector = debt_collector(soup) 
-                    new_data = scrape_data(cnpj, year, soup, table) 
-                    master_df = pd.concat([master_df, new_data], ignore_index=True) 
+                outstanding_payments = outstanding_payment(new_data) 
 
-                    if is_debt_collector: 
-                        print(f"Debt collection table found in year {year}.") 
-                        debt_data = scrape_debt_table(cnpj, soup) 
-                        master_debt_df = pd.concat([master_debt_df, debt_data], ignore_index=True) 
-
-                    outstanding_payments = outstanding_payment(new_data) 
-
-                    if not is_debt_collector and outstanding_payments and not obtained_pdf: 
-                        print(f"Outstanding payments found in year {year}, period {outstanding_payments}, attempting to obtain PDF.") 
-                        obtain_pdf(driver, wait, outstanding_payments) 
-                        driver.back() 
-                        obtained_pdf = 1 
-
+                if not is_debt_collector and outstanding_payments and not obtained_pdf: 
+                    print(f"Outstanding payments found in year {year}, period {outstanding_payments}, attempting to obtain PDF.") 
+                    obtain_pdf(driver, wait, outstanding_payments) 
                     driver.back() 
-                    time.sleep(2) 
+                    obtained_pdf = 1 
 
-                except Exception as e: 
-                    print(f"Error with year {year}:", e) 
+                driver.back() 
+                time.sleep(2) 
 
-        except Exception as outer_error: 
-            print(f"Fatal error with CNPJ {cnpj}:", outer_error) 
+            except Exception as e: 
+                print(f"Error with year {year}:", e) 
 
-        finally: 
-            try: 
-                driver.quit() 
-            except: 
-                pass 
-            kill_chrome() 
-            timings_report(start_time, total_start_time, timings) 
+    except Exception as outer_error: 
+        print(f"Fatal error with CNPJ {cnpj}:", outer_error) 
 
-    remove_chrome_profile_dir(chrome_profile_path) 
+    finally: 
+        try: 
+            driver.quit() 
+        except: 
+            pass 
+        kill_chrome() 
+        timings_report(start_time, total_start_time, timings) 
 
-    # Export dataframes to CSV (optionally, use a unique name per batch) 
-    master_df['Quotas'] = master_df['Quotas'].fillna(0).astype(int) 
-    master_df["year"] = master_df["Período de Apuração"].str.extract(r'(\d{4})').astype(int) 
-    month_mapping = { 
-        'janeiro': 1, 'fevereiro': 2, 'março': 3, 'abril': 4, 
-        'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8, 
-        'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12 
-    } 
-    master_df["month"] = master_df["Período de Apuração"].str.extract(r'(\w+)') 
-    master_df['month'] = master_df['month'].str.lower().map(month_mapping) 
-    master_df = master_df[['cnpj', 'Período de Apuração','year','month', 'Apurado', 'Situação', 'Benefício INSS', 
-            'Quotas', 'Principal', 'Multa', 'Juros', 'Total', 
-            'Data de Vencimento', 'Data de Acolhimento', 'data_found']] 
-    master_df = master_df.sort_values(by=['cnpj', 'year', 'month']) 
+    # remove_chrome_profile_dir(chrome_profile_path) 
 
-    # Save with a unique name per batch (e.g., using time or batch id) 
-    batch_id = int(time.time()) 
-    master_df.to_csv(f'../data/master_df_{batch_id}.csv', index=False, encoding='utf-8') 
-    master_debt_df.to_csv(f'../data/master_debt_df_{batch_id}.csv', index=False, encoding='utf-8') 
-    print(f"Batch data exported to ../data/master_df_{batch_id}.csv and ../data/master_debt_df_{batch_id}.csv") 
+    # # Export dataframes to CSV (optionally, use a unique name per batch) 
+    # if 'Quotas' in master_df.columns:
+    #     master_df['Quotas'] = master_df['Quotas'].fillna(0).astype(int) 
+    # master_df["year"] = master_df["Período de Apuração"].str.extract(r'(\d{4})').astype(int) 
+    # month_mapping = { 
+    #     'janeiro': 1, 'fevereiro': 2, 'março': 3, 'abril': 4, 
+    #     'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8, 
+    #     'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12 
+    # } 
+    # master_df["month"] = master_df["Período de Apuração"].str.extract(r'(\w+)') 
+    # master_df['month'] = master_df['month'].str.lower().map(month_mapping) 
+    # # Only include 'Quotas' if it exists
+    # columns = [
+    #     'cnpj', 'Período de Apuração', 'year', 'month', 'Apurado', 'Situação', 'Benefício INSS',
+    #     'Principal', 'Multa', 'Juros', 'Total',
+    #     'Data de Vencimento', 'Data de Acolhimento', 'data_found'
+    # ]
+    # if 'Quotas' in master_df.columns:
+    #     columns.insert(7, 'Quotas')  # Insert 'Quotas' after 'Benefício INSS'
+
+    # master_df = master_df[[col for col in columns if col in master_df.columns]] 
+    # master_df = master_df.sort_values(by=['cnpj', 'year', 'month']) 
+
+    # # Save with a unique name per batch (e.g., using time or batch id) 
+    # batch_id = int(time.time()) 
+    # master_df.to_csv(f'../data/master_df_{batch_id}.csv', index=False, encoding='utf-8') 
+    # master_debt_df.to_csv(f'../data/master_debt_df_{batch_id}.csv', index=False, encoding='utf-8') 
+    # print(f"Batch data exported to ../data/master_df_{batch_id}.csv and ../data/master_debt_df_{batch_id}.csv") 
 
 
 def process_cnpj_batch_playwright(cnpj_batch):
@@ -522,3 +566,4 @@ def process_cnpj_batch_playwright(cnpj_batch):
                 enabled_years = [option.inner_text().strip() for option in select.query_selector_all("option") if option.inner_text().strip()]
                 enabled_years = [year for year in enabled_years if "Não optante" not in year]
                 use_bootstrap = False
+                

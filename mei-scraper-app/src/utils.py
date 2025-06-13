@@ -84,13 +84,13 @@ def kill_chrome():
                 proc.kill() 
             except psutil.NoSuchProcess: 
                 pass 
-def autogui_open_page(chrome_profile_path, url, cnpj): 
+def autogui_open_page(chrome_profile_path, url, cnpj, port): 
     try: 
         # ---- Step 1: Start Chrome in remote debug mode ---- 
-        subprocess.Popen([ 
+        proc = subprocess.Popen([ 
             r"C:/Program Files/Google/Chrome/Application/chrome.exe", 
             #f"--proxy-server={proxy}", 
-            "--remote-debugging-port=9222", 
+            f"--remote-debugging-port={port}", 
             "--user-data-dir=" + chrome_profile_path, 
             "--start-maximized",  # or "--start-fullscreen" 
             "--disable-popup-blocking",  # optional, disable for debugging only 
@@ -113,7 +113,8 @@ def autogui_open_page(chrome_profile_path, url, cnpj):
 
         #pyautogui.moveTo(x=1027, y=500, duration=1) # Laptop x=675, y=630 desktop: x=1027, y=500 
         #pyautogui.click() 
-        time.sleep(2) 
+        time.sleep(2)
+        return proc
     except Exception as e: 
         print(f"Error opening page with pyautogui: {e}") 
         return False 
@@ -151,11 +152,11 @@ def selenium_open_page_and_login(chrome_profile_path, url, cnpj):
     # Wait for navigation or next page to load as needed
     time.sleep(2)
     return driver, wait
-def selenium_open_page(url_inside): 
+def selenium_open_page(url_inside,port): 
 
     # Selenium setup 
     options = Options() 
-    options.add_experimental_option("debuggerAddress", "127.0.0.1:9222") 
+    options.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}") 
     driver = webdriver.Chrome(options=options) 
     wait = WebDriverWait(driver, 3) 
 
@@ -396,11 +397,7 @@ def queue_cnpj_batches(cnpj_list, batch_size=10):
     """Queue CNPJ batches as Celery tasks.""" 
     for batch in batch_cnpjs(cnpj_list, batch_size): 
         process_cnpj_batch_task.delay(batch) 
-def process_cnpj_batch(chrome_profile_path, cnpj): 
-    import os 
-    import pandas as pd 
-    import time 
-    import shutil 
+def process_cnpj_batch(chrome_profile_path, cnpj, port): 
 
     #chrome_profile_path = "C:/Temp/ChromeDebug" 
     url = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/Identificacao" 
@@ -418,9 +415,9 @@ def process_cnpj_batch(chrome_profile_path, cnpj):
 
         #autogui_open_page(chrome_profile_path, url, cnpj) 
         #selenium_open_page_and_login(chrome_profile_path, url, cnpj)
-        driver, wait = selenium_open_page(url_inside) 
+        driver, wait = selenium_open_page(url_inside,port) 
 
-        #cnpj_check(driver, cnpj) 
+        cnpj_check(driver, cnpj) 
 
         try: 
             enabled_years, use_bootstrap = get_enabled_years_bootstrap(wait, cnpj) 
@@ -478,43 +475,46 @@ def process_cnpj_batch(chrome_profile_path, cnpj):
         print(f"Fatal error with CNPJ {cnpj}:", outer_error) 
 
     finally: 
-        try: 
+        try:
+            print("Closing browser...")
             driver.quit() 
         except: 
             pass 
-        kill_chrome() 
+        #kill_chrome() 
         timings_report(start_time, total_start_time, timings) 
 
-    # remove_chrome_profile_dir(chrome_profile_path) 
+    print("removing chrome profile directory...")
+    remove_chrome_profile_dir(chrome_profile_path) 
 
-    # # Export dataframes to CSV (optionally, use a unique name per batch) 
-    # if 'Quotas' in master_df.columns:
-    #     master_df['Quotas'] = master_df['Quotas'].fillna(0).astype(int) 
-    # master_df["year"] = master_df["Período de Apuração"].str.extract(r'(\d{4})').astype(int) 
-    # month_mapping = { 
-    #     'janeiro': 1, 'fevereiro': 2, 'março': 3, 'abril': 4, 
-    #     'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8, 
-    #     'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12 
-    # } 
-    # master_df["month"] = master_df["Período de Apuração"].str.extract(r'(\w+)') 
-    # master_df['month'] = master_df['month'].str.lower().map(month_mapping) 
-    # # Only include 'Quotas' if it exists
-    # columns = [
-    #     'cnpj', 'Período de Apuração', 'year', 'month', 'Apurado', 'Situação', 'Benefício INSS',
-    #     'Principal', 'Multa', 'Juros', 'Total',
-    #     'Data de Vencimento', 'Data de Acolhimento', 'data_found'
-    # ]
-    # if 'Quotas' in master_df.columns:
-    #     columns.insert(7, 'Quotas')  # Insert 'Quotas' after 'Benefício INSS'
+def store_data(master_df, master_debt_df):
+    # Export dataframes to CSV (optionally, use a unique name per batch) 
+    if 'Quotas' in master_df.columns:
+        master_df['Quotas'] = master_df['Quotas'].fillna(0).astype(int) 
+    master_df["year"] = master_df["Período de Apuração"].str.extract(r'(\d{4})').astype(int) 
+    month_mapping = { 
+        'janeiro': 1, 'fevereiro': 2, 'março': 3, 'abril': 4, 
+        'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8, 
+        'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12 
+    } 
+    master_df["month"] = master_df["Período de Apuração"].str.extract(r'(\w+)') 
+    master_df['month'] = master_df['month'].str.lower().map(month_mapping) 
+    # Only include 'Quotas' if it exists
+    columns = [
+        'cnpj', 'Período de Apuração', 'year', 'month', 'Apurado', 'Situação', 'Benefício INSS',
+        'Principal', 'Multa', 'Juros', 'Total',
+        'Data de Vencimento', 'Data de Acolhimento', 'data_found'
+    ]
+    if 'Quotas' in master_df.columns:
+        columns.insert(7, 'Quotas')  # Insert 'Quotas' after 'Benefício INSS'
 
-    # master_df = master_df[[col for col in columns if col in master_df.columns]] 
-    # master_df = master_df.sort_values(by=['cnpj', 'year', 'month']) 
+    master_df = master_df[[col for col in columns if col in master_df.columns]] 
+    master_df = master_df.sort_values(by=['cnpj', 'year', 'month']) 
 
-    # # Save with a unique name per batch (e.g., using time or batch id) 
-    # batch_id = int(time.time()) 
-    # master_df.to_csv(f'../data/master_df_{batch_id}.csv', index=False, encoding='utf-8') 
-    # master_debt_df.to_csv(f'../data/master_debt_df_{batch_id}.csv', index=False, encoding='utf-8') 
-    # print(f"Batch data exported to ../data/master_df_{batch_id}.csv and ../data/master_debt_df_{batch_id}.csv") 
+    # Save with a unique name per batch (e.g., using time or batch id) 
+    batch_id = int(time.time()) 
+    master_df.to_csv(f'../data/master_df_{batch_id}.csv', index=False, encoding='utf-8') 
+    master_debt_df.to_csv(f'../data/master_debt_df_{batch_id}.csv', index=False, encoding='utf-8') 
+    print(f"Batch data exported to ../data/master_df_{batch_id}.csv and ../data/master_debt_df_{batch_id}.csv") 
 
 
 def process_cnpj_batch_playwright(cnpj_batch):

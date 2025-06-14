@@ -173,7 +173,8 @@ def selenium_open_page_and_login(chrome_profile_path, url, cnpj):
 def selenium_open_page(url_inside,port): 
 
     # Selenium setup 
-    options = Options() 
+    options = Options()
+    options.add_argument("--headless")
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}") 
     driver = webdriver.Chrome(options=options) 
     wait = WebDriverWait(driver, 3) 
@@ -362,17 +363,16 @@ def get_enabled_years_native(wait, cnpj, driver):
     enabled_years = [year for year in enabled_years if "Não optante" not in year] 
     print("Native <select> enabled years for CNPJ ", cnpj,":", enabled_years) 
     return enabled_years, False 
-def select_year_bootstrap(driver, year, retries=3, delay=2):
+def select_year_bootstrap(wait, driver, year, retries=3, delay=2):
     for attempt in range(retries):
         try:
-            wait_short = WebDriverWait(driver, 3)
-            dropdown_button = wait_short.until(
+            dropdown_button = wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-id="anoCalendarioSelect"]'))
             )
             driver.execute_script("arguments[0].click();", dropdown_button)
             time.sleep(1.5)
             print("Clicking on year:", year)
-            year_option = wait_short.until(
+            year_option = wait.until(
                 EC.element_to_be_clickable((By.XPATH, f"//span[@class='text' and normalize-space(text())='{year}']"))
             )
             print("Executing...")
@@ -382,14 +382,11 @@ def select_year_bootstrap(driver, year, retries=3, delay=2):
         except (TimeoutException, ElementClickInterceptedException, NoSuchElementException) as e:
             print(f"Attempt {attempt+1} failed to select year {year} (Bootstrap): {e}")
             time.sleep(delay)
-    raise Exception(f"Failed to select year {year} (Bootstrap) after {retries} attempts.")
-
-    
-def select_year_native(driver, year, retries=3, delay=2):
+    raise Exception(f"Failed to select year {year} (Bootstrap) after {retries} attempts.")    
+def select_year_native(wait, driver, year, retries=3, delay=2):
     for attempt in range(retries):
         try:
-            wait_short = WebDriverWait(driver, 3)
-            dropdown = Select(wait_short.until(
+            dropdown = Select(wait.until(
                 EC.presence_of_element_located((By.ID, "anoCalendarioSelect"))
             ))
             dropdown.select_by_visible_text(year)
@@ -474,25 +471,32 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
         obtained_pdf = 0 
         for index, year in enumerate(enabled_years): 
             try: 
-                if use_bootstrap: 
+                if use_bootstrap:
+                    print(f"Selecting year {year} using Bootstrap method.")
                     select_year_bootstrap(wait, driver, year) 
                 else: 
-                    select_year_native(driver, year) 
+                    print(f"Selecting year {year} using native method.")
+                    select_year_native(wait, driver, year) 
 
+                print("clicking ok")
+    
                 ok_button = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
                 )
-                ok_button.send_keys(Keys.Enter)
+                ok_button.send_keys(Keys.ENTER)
                 time.sleep(3)
 
                 soup = BeautifulSoup(driver.page_source, 'html.parser') 
                 table = soup.find('table', class_='table table-hover table-condensed emissao is-detailed')
-                print(f"table: {table}")
-                if not table: 
+                if table is not None:
+                    print("Table found for year:", year)
+                if not table:
                     master_df = handle_missing_table(cnpj, year, enabled_years, index, data, master_df) 
                     break 
+                
 
-                is_debt_collector = debt_collector(soup) 
+                is_debt_collector = debt_collector(soup)
+                print("scraping main table)")
                 new_data = scrape_data(cnpj, year, soup, table) 
                 master_df = pd.concat([master_df, new_data], ignore_index=True) 
             
@@ -502,6 +506,7 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
                     debt_data = scrape_debt_table(cnpj, soup) 
                     master_debt_df = pd.concat([master_debt_df, debt_data], ignore_index=True) 
 
+                print(f"Type of year: {type(year)}, value: {year}")
                 outstanding_payments = outstanding_payment(new_data) 
 
                 if not is_debt_collector and outstanding_payments and not obtained_pdf: 
@@ -510,7 +515,9 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
                     driver.back() 
                     obtained_pdf = 1 
 
-                driver.back() 
+                
+                driver.back()
+                print("back button clicked")
                 time.sleep(2) 
 
             except Exception as e: 

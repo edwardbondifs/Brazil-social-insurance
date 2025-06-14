@@ -20,8 +20,8 @@ import random
 import requests
 import re
 import shutil
-from multiprocessing import Pool, cpu_count
-import random
+from multiprocessing import Pool, Lock, Manager, cpu_count
+import os
 
 from utils import *
 
@@ -50,20 +50,7 @@ from utils import *
 #         # Use the pool to run the main function in parallel
 #         p.map(main())
 
-from multiprocessing import Pool, Lock, Manager, cpu_count
-import os
-import pandas as pd
-from utils import *
 
-import logging
-
-# Configure logging
-logging.basicConfig(
-    filename='mei_scraper.log',
-    filemode='a',  # Append mode
-    format='%(asctime)s %(levelname)s: %(message)s',
-    level=logging.INFO
-)
 
 def worker(args):
     try:
@@ -80,6 +67,7 @@ def worker(args):
             # Only one worker can be on the main URL page at a time
                 with lock:
                         print(f"Worker {profile_id} entering critical section for CNPJ {cnpj}")
+                        time.sleep(2)
                         # Here, call your function that uses PyAutoGUI to interact with the main URL page
                         chrome_proc = autogui_open_page(chrome_profile_path, "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/Identificacao", cnpj, port)
                         print(f"Worker {profile_id} leaving critical section for CNPJ {cnpj}")
@@ -112,7 +100,7 @@ def main():
     print("Starting MEI Scraper...")
     cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=5)
     #get the first cnpj
-    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:1].to_list()  # Use more for a real test
+    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:2].to_list()  # Use more for a real test
     print(f"Total CNPJ numbers to process: {len(cnpj_list)}")
     print("CNPJ List:", cnpj_list)
 
@@ -124,8 +112,9 @@ def main():
     args = [(batch, i, lock) for i, batch in enumerate(batches)]
 
     #combines all batches together
-    with Pool(1) as p:
+    with Pool(2) as p:
         results = p.map(worker, args)
+        print(f"results:{results}")
     for df, debt_df in results:
         if not df.empty:
             master_df = pd.concat([master_df, df], ignore_index=True)

@@ -50,13 +50,26 @@ from utils import *
 #         # Use the pool to run the main function in parallel
 #         p.map(main())
 
+# to do:
+# Check all cnpj's work
+# assign worker to dataset - is is particular workers?
+# check all ports work
+# Understand why bootstrap is not working
+
+
 
 
 def worker(args):
     try:
         batch, profile_id, lock = args
         chrome_profile_path = f"C:/Temp/ChromeProfile_{profile_id}"  # or "C:/Temp/ChromeProfile_{profile_id}" on Windows
-        port = 922 + profile_id  # Unique port for each worker
+        port = "922" + str(profile_id)  # Unique port for each worker
+        port = int(port) # make port integer
+        worker_id_port = str(profile_id) + "-" + str(port)
+        #check port is available#
+        if not is_port_available(port):
+            print(f"Port {port} is not available for worker {profile_id}. Exiting.")
+            return pd.DataFrame(), pd.DataFrame()
         print(f"Worker {profile_id} using profile: {chrome_profile_path}")
         print(f"worker {profile_id} processing the following cnpjs in batch: {batch}")
         all_data = pd.DataFrame()
@@ -77,6 +90,8 @@ def worker(args):
                 print(f"Worker {profile_id} sleeping for {delay:.1f} seconds before processing {cnpj}")
                 time.sleep(delay)
                 new_data, debt_data = process_cnpj_batch(chrome_profile_path, cnpj, port) # combines all years for a given cnpj together            
+                new_data["worker_id_port"] = "id:" + str(worker_id_port)  # Add worker ID to the data
+                debt_data["worker_id_port"] = "id:" + str(worker_id_port)  # Add worker ID to the debt data
                 if chrome_proc:
                     chrome_proc.terminate() #closes autogui chrome
                     chrome_proc.wait()
@@ -91,6 +106,7 @@ def worker(args):
     return all_data, all_debt_data            
 
 def main():
+    start_time = time.time()
     master_df = pd.DataFrame() 
     master_debt_df = pd.DataFrame() 
 
@@ -98,13 +114,22 @@ def main():
     print("Current working directory:", os.getcwd())
 
     print("Starting MEI Scraper...")
-    cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=5)
-    #get the first cnpj
-    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:2].to_list()  # Use more for a real test
+    #cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=100)
+    cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=30)
+    
+    # keep only rows where used_bootstrap is false
+    #cnpj_merged = cnpj_merged[cnpj_merged['used_bootstrap'] == False].drop_duplicates(subset='cnpj', keep='first')
+    print(f"Total CNPJ numbers to process: {len(cnpj_merged)}")
+
+    # Create list of CNPJ numbers to process
+    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:10].to_list()  # Use more for a real test
+    #cnpj_list = cnpj_merged['cnpj'].astype(str).to_list()  # Use more for a real test
+    #cnpj_list = ["30065905000100"]
+
     print(f"Total CNPJ numbers to process: {len(cnpj_list)}")
     print("CNPJ List:", cnpj_list)
 
-    batch_size = 1
+    batch_size = 2
     batches = list(batch_cnpjs(cnpj_list, batch_size))
     manager = Manager()
     lock = manager.Lock()
@@ -112,7 +137,7 @@ def main():
     args = [(batch, i, lock) for i, batch in enumerate(batches)]
 
     #combines all batches together
-    with Pool(2) as p:
+    with Pool(5) as p:
         results = p.map(worker, args)
         print(f"results:{results}")
     for df, debt_df in results:
@@ -121,6 +146,8 @@ def main():
         if not debt_df.empty:
             master_debt_df = pd.concat([master_debt_df, debt_df], ignore_index=True)
     store_data(master_df, master_debt_df)
+    end_time = time.time()
+    print(f"Total time taken: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()

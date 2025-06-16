@@ -23,7 +23,7 @@ import re
 import fitz  # PyMuPDF 
 import shutil 
 import undetected_chromedriver as uc 
-
+import socket
 # --- PDF and File Utilities --- 
 def extract_cpf(file): 
     try: 
@@ -195,6 +195,9 @@ def remove_chrome_profile_dir(path, retries=0, delay=2):
             time.sleep(delay)
         if e is not None: 
             print(f"Failed to remove {path} after {retries} attempts: {e}") 
+def is_port_available(port, host='127.0.0.1'):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((host, port)) != 0
 
 # --- Scraping Utilities --- 
 def cnpj_check(driver, cnpj): 
@@ -245,10 +248,10 @@ def scrape_data(cnpj, year, soup, table):
         if quota_split: #If we have a table with a quotas column 
         
             # Check if each row  has quotas that require a split 
-            quota_row = any( 
-                inp.get("data-pa-quota") == "true" 
-                for inp in row.find_all("input", attrs={"data-pa-quota": True}) 
-            ) 
+            quota_row = any(
+                inp.has_attr("checked")
+                for inp in row.find_all("input", class_="quotasSelecionado", attrs={"data-pa-quota": "true"})
+            )
 
             if quota_row: 
                 # First 4 cells: Período, Apurado, Benefício, Quotas (set to 1) 
@@ -280,7 +283,8 @@ def scrape_data(cnpj, year, soup, table):
             i += 1 
 
     
-    # Step 4: Build DataFrame 
+    # Step 4: Build DataFrame
+    print(cleaned_data)
     df = pd.DataFrame(cleaned_data, columns=cols) 
     df['cnpj'] = cnpj 
     df['data_found'] = True 
@@ -344,7 +348,7 @@ def get_enabled_years_bootstrap(wait, cnpj):
     year_elements = wait.until(EC.presence_of_all_elements_located( 
         (By.CSS_SELECTOR, ".dropdown-menu.inner li a span.text") 
     )) 
-    enabled_years = [el.text.strip() for el in year_elements if el.text.strip()] 
+    enabled_years = [el.text.strip() for el in year_elements if el.text.strip() and el.get_attribute("class") != "disabled"] 
     enabled_years = [year for year in enabled_years if "Não optante" not in year] 
 
     if not enabled_years: 
@@ -363,26 +367,37 @@ def get_enabled_years_native(wait, cnpj, driver):
     enabled_years = [year for year in enabled_years if "Não optante" not in year] 
     print("Native <select> enabled years for CNPJ ", cnpj,":", enabled_years) 
     return enabled_years, False 
-def select_year_bootstrap(wait, driver, year, retries=3, delay=2):
+def select_year_bootstrap(cnpj, wait, driver, year, retries=3, delay=2, wait_timeout=1):
     for attempt in range(retries):
         try:
-            dropdown_button = wait.until(
+            print(f"{cnpj} - Bootstrap select attempt {attempt+1} for year {year}")
+            wait_long = WebDriverWait(driver, wait_timeout)
+            dropdown_button = wait_long.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-id="anoCalendarioSelect"]'))
             )
             driver.execute_script("arguments[0].click();", dropdown_button)
             time.sleep(1.5)
             print("Clicking on year:", year)
-            year_option = wait.until(
+            year_option = wait_long.until(
                 EC.element_to_be_clickable((By.XPATH, f"//span[@class='text' and normalize-space(text())='{year}']"))
             )
-            print("Executing...")
+            print(f"{cnpj} - Executing...")
             driver.execute_script("arguments[0].click();", year_option)
-            print(f"Selected (Bootstrap) year: {year}")
-            return  # Success
+            print(f"{cnpj} - Successfully selected year: {year}")
+            
+            ok_button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+                )
+            print(f"{cnpj} - ok button identified")
+            ok_button.send_keys(Keys.ENTER)
+            driver.execute_script("arguments[0].click()", ok_button)
+            print(f"{cnpj} - ok button clicked by pressing enter")
+            time.sleep(2)
+
         except (TimeoutException, ElementClickInterceptedException, NoSuchElementException) as e:
-            print(f"Attempt {attempt+1} failed to select year {year} (Bootstrap): {e}")
+            print(f"{cnpj} -  Attempt {attempt+1} failed to select year {year} (Bootstrap): {e}")
             time.sleep(delay)
-    raise Exception(f"Failed to select year {year} (Bootstrap) after {retries} attempts.")    
+    raise Exception(f"{cnpj} - Failed to select year {year} (Bootstrap) after {retries} attempts.")    
 def select_year_native(wait, driver, year, retries=3, delay=2):
     for attempt in range(retries):
         try:
@@ -391,6 +406,14 @@ def select_year_native(wait, driver, year, retries=3, delay=2):
             ))
             dropdown.select_by_visible_text(year)
             print(f"Selected (native) year: {year}")
+            time.sleep(0.5)
+            # Click OK/Submit button if needed
+            ok_button = wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+            )
+            ok_button.click()
+            # ok_button.send_keys(Keys.ENTER)
+            time.sleep(2)
             return  # Success
         except (TimeoutException, ElementClickInterceptedException, NoSuchElementException) as e:
             print(f"Attempt {attempt+1} failed to select year {year} (Native): {e}")
@@ -463,6 +486,7 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
             print("Bootstrap dropdown failed, falling back to native <select> method.") 
             enabled_years, use_bootstrap = get_enabled_years_native(wait, cnpj, driver) 
 
+        use_bootstrap = True
         # include only max of enabled years
         #enabled_years = [max(enabled_years)] 
         print("scraping years", enabled_years) 
@@ -473,21 +497,29 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
             try: 
                 if use_bootstrap:
                     print(f"Selecting year {year} using Bootstrap method.")
-                    select_year_bootstrap(wait, driver, year) 
+                    select_year_bootstrap(cnpj, wait, driver, year) 
                 else: 
                     print(f"Selecting year {year} using native method.")
                     select_year_native(wait, driver, year) 
+                    time.sleep(1)
 
                 print("clicking ok")
     
-                ok_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
-                )
-                ok_button.send_keys(Keys.ENTER)
-                time.sleep(3)
+                # ok_button = WebDriverWait(driver, 10).until(
+                #     EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+                # )
+                # ok_button.send_keys(Keys.ENTER)
+                # time.sleep(2)
 
-                soup = BeautifulSoup(driver.page_source, 'html.parser') 
-                table = soup.find('table', class_='table table-hover table-condensed emissao is-detailed')
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                # Export soup to a text file with CNPJ in the filename
+                os.makedirs("html", exist_ok=True)
+                with open(f"html/soup_{cnpj}.html", "w", encoding="utf-8") as f:
+                    f.write(str(soup))
+                table = soup.find('table', class_=[
+                    'table', 'table-hover', 'table-condensed', 'emissao', 'is-detailed'
+                ])
+                #print(table)
                 if table is not None:
                     print("Table found for year:", year)
                 if not table:
@@ -534,12 +566,13 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
             pass 
         #kill_chrome() 
         timings_report(start_time, total_start_time, timings) 
-    
+   
+    # Add a column to master_df indicating if bootstrap was used
+    master_df['used_bootstrap'] = use_bootstrap if not master_df.empty else None
 
     print("removing chrome profile directory...")
     remove_chrome_profile_dir(chrome_profile_path)
     return master_df, master_debt_df
-
 def store_data(master_df, master_debt_df):
     # Export dataframes to CSV (optionally, use a unique name per batch) 
     if 'Quotas' in master_df.columns:
@@ -556,7 +589,7 @@ def store_data(master_df, master_debt_df):
     columns = [
         'cnpj', 'Período de Apuração', 'year', 'month', 'Apurado', 'Situação', 'Benefício INSS',
         'Principal', 'Multa', 'Juros', 'Total',
-        'Data de Vencimento', 'Data de Acolhimento', 'data_found'
+        'Data de Vencimento', 'Data de Acolhimento', 'data_found', "used_bootstrap", "worker_id_port"
     ]
     if 'Quotas' in master_df.columns:
         columns.insert(7, 'Quotas')  # Insert 'Quotas' after 'Benefício INSS'

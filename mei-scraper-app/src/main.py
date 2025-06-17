@@ -22,7 +22,7 @@ import re
 import shutil
 from multiprocessing import Pool, Lock, Manager, cpu_count
 import os
-
+from Tee import Tee
 from utils import *
 
 # def main():
@@ -57,7 +57,10 @@ from utils import *
 # Understand why bootstrap is not working
 
 
-
+log_dir = "../data/log"
+log_file = open(os.path.join(log_dir, 'output.txt'), 'w', encoding='utf-8')
+sys.stdout = Tee(sys.__stdout__, log_file)
+number_cnpjs = 10
 
 def worker(args):
     try:
@@ -115,16 +118,16 @@ def main():
 
     print("Starting MEI Scraper...")
     #cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=100)
-    cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=30)
+    cnpj_merged = pd.read_csv('../data/in/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=number_cnpjs)
     
     # keep only rows where used_bootstrap is false
     #cnpj_merged = cnpj_merged[cnpj_merged['used_bootstrap'] == False].drop_duplicates(subset='cnpj', keep='first')
     print(f"Total CNPJ numbers to process: {len(cnpj_merged)}")
 
     # Create list of CNPJ numbers to process
-    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:10].to_list()  # Use more for a real test
+    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:number_cnpjs].to_list()  # Use more for a real test
     #cnpj_list = cnpj_merged['cnpj'].astype(str).to_list()  # Use more for a real test
-    #cnpj_list = ["30065905000100"]
+    cnpj_list = ["12408064000105"]
 
     print(f"Total CNPJ numbers to process: {len(cnpj_list)}")
     print("CNPJ List:", cnpj_list)

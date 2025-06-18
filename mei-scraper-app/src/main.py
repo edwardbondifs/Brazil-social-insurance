@@ -60,13 +60,13 @@ from utils import *
 log_dir = "../data/log"
 log_file = open(os.path.join(log_dir, 'output.txt'), 'w', encoding='utf-8')
 sys.stdout = Tee(sys.__stdout__, log_file)
-number_cnpjs = 10
+number_cnpjs = 100
 
 def worker(args):
     try:
         batch, profile_id, lock = args
         chrome_profile_path = f"C:/Temp/ChromeProfile_{profile_id}"  # or "C:/Temp/ChromeProfile_{profile_id}" on Windows
-        port = "922" + str(profile_id)  # Unique port for each worker
+        port = 9220 + profile_id  # Unique port for each worker
         port = int(port) # make port integer
         worker_id_port = str(profile_id) + "-" + str(port)
         #check port is available#
@@ -77,6 +77,7 @@ def worker(args):
         print(f"worker {profile_id} processing the following cnpjs in batch: {batch}")
         all_data = pd.DataFrame()
         all_debt_data = pd.DataFrame()
+        all_cnpj_cpf_map = pd.DataFrame()  # Initialize an empty DataFrame for CNPJ-CPF mapping
 
         for cnpj in batch:
             try:
@@ -92,7 +93,7 @@ def worker(args):
                 delay = random.uniform(1, 2)  # 3 to 8 seconds, adjust as needed
                 print(f"Worker {profile_id} sleeping for {delay:.1f} seconds before processing {cnpj}")
                 time.sleep(delay)
-                new_data, debt_data = process_cnpj_batch(chrome_profile_path, cnpj, port) # combines all years for a given cnpj together            
+                new_data, debt_data, cnpj_cpf_map = process_cnpj_batch(chrome_profile_path, cnpj, port) # combines all years for a given cnpj together            
                 new_data["worker_id_port"] = "id:" + str(worker_id_port)  # Add worker ID to the data
                 debt_data["worker_id_port"] = "id:" + str(worker_id_port)  # Add worker ID to the debt data
                 if chrome_proc:
@@ -102,37 +103,49 @@ def worker(args):
                     all_data = pd.concat([all_data, new_data], ignore_index=True) # combines all data from cnpj's in a given batch together
                 if debt_data is not None and not debt_data.empty:
                     all_debt_data = pd.concat([all_debt_data, debt_data], ignore_index=True)
+                if cnpj_cpf_map is not None and not cnpj_cpf_map.empty:
+                    all_cnpj_cpf_map = pd.concat([all_cnpj_cpf_map, cnpj_cpf_map], ignore_index=True)
             except:
                 print(f"Error processing CNPJ {cnpj} in worker {profile_id}: {e}")
     except Exception as e:
         print(f"Worker {profile_id} encountered an error: {e}")
-    return all_data, all_debt_data            
+    return all_data, all_debt_data, all_cnpj_cpf_map            
 
 def main():
     start_time = time.time()
+    print(f"Start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
     master_df = pd.DataFrame() 
-    master_debt_df = pd.DataFrame() 
+    master_debt_df = pd.DataFrame()
+    master_mapping = pd.DataFrame() 
 
+    # Set directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     print("Current working directory:", os.getcwd())
 
+    # Load in MEI numbers
     print("Starting MEI Scraper...")
-    #cnpj_merged = pd.read_csv('../data/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=100)
     cnpj_merged = pd.read_csv('../data/in/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=number_cnpjs)
-    
-    # keep only rows where used_bootstrap is false
-    #cnpj_merged = cnpj_merged[cnpj_merged['used_bootstrap'] == False].drop_duplicates(subset='cnpj', keep='first')
-    print(f"Total CNPJ numbers to process: {len(cnpj_merged)}")
 
     # Create list of CNPJ numbers to process
     cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:number_cnpjs].to_list()  # Use more for a real test
-    #cnpj_list = cnpj_merged['cnpj'].astype(str).to_list()  # Use more for a real test
-    cnpj_list = ["12408064000105"]
+    # cnpj_list.extend([
+    # "40463732000132", 
+    # "40710174000162",
+    # "41084097000145",   
+    # "41199048000158",
+    # "41892941000164",
+    # "42010591000128",
+    # "42050465000105",
+    # "42729441000179",
+    # "43531252000150",
+    # "43654121000160",
+    # "43691045000162"
+    # ])
 
     print(f"Total CNPJ numbers to process: {len(cnpj_list)}")
     print("CNPJ List:", cnpj_list)
 
-    batch_size = 2
+    batch_size = 10
     batches = list(batch_cnpjs(cnpj_list, batch_size))
     manager = Manager()
     lock = manager.Lock()
@@ -140,15 +153,18 @@ def main():
     args = [(batch, i, lock) for i, batch in enumerate(batches)]
 
     #combines all batches together
-    with Pool(5) as p:
+    with Pool(10) as p:
         results = p.map(worker, args)
-        print(f"results:{results}")
-    for df, debt_df in results:
+        #print(f"results:{results}")
+    for df, debt_df, df_map in results:
         if not df.empty:
             master_df = pd.concat([master_df, df], ignore_index=True)
         if not debt_df.empty:
             master_debt_df = pd.concat([master_debt_df, debt_df], ignore_index=True)
-    store_data(master_df, master_debt_df)
+        if not df_map.empty:
+            master_mapping = pd.concat([master_mapping, df_map], ignore_index=True)
+    print(f"Total records processed: {len(master_df)}")
+    store_data(master_df, master_debt_df, master_mapping)
     end_time = time.time()
     print(f"Total time taken: {end_time - start_time:.2f} seconds")
 

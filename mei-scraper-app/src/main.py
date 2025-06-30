@@ -60,7 +60,7 @@ from utils import *
 log_dir = "../data/log"
 log_file = open(os.path.join(log_dir, 'output.txt'), 'w', encoding='utf-8')
 sys.stdout = Tee(sys.__stdout__, log_file)
-number_cnpjs = 100
+number_cnpjs = 500
 
 def worker(args):
     try:
@@ -75,6 +75,7 @@ def worker(args):
             return pd.DataFrame(), pd.DataFrame()
         print(f"Worker {profile_id} using profile: {chrome_profile_path}")
         print(f"worker {profile_id} processing the following cnpjs in batch: {batch}")
+        print(f"number of cpus available: {cpu_count()}")
         all_data = pd.DataFrame()
         all_debt_data = pd.DataFrame()
         all_cnpj_cpf_map = pd.DataFrame()  # Initialize an empty DataFrame for CNPJ-CPF mapping
@@ -145,7 +146,7 @@ def main():
     print(f"Total CNPJ numbers to process: {len(cnpj_list)}")
     print("CNPJ List:", cnpj_list)
 
-    batch_size = 10
+    batch_size = 50
     batches = list(batch_cnpjs(cnpj_list, batch_size))
     manager = Manager()
     lock = manager.Lock()

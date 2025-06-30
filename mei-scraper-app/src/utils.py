@@ -8,7 +8,9 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By 
 from selenium.webdriver.support.ui import WebDriverWait 
 from selenium.webdriver.support import expected_conditions as EC 
-from selenium.webdriver.common.action_chains import ActionChains 
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException, NoSuchElementException
+from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup 
 import psutil   
 from selenium.webdriver.support.ui import Select 
@@ -21,7 +23,8 @@ import re
 import fitz  # PyMuPDF 
 import shutil 
 import undetected_chromedriver as uc 
-
+import socket
+import io
 # --- PDF and File Utilities --- 
 def extract_cpf(file): 
     try: 
@@ -45,45 +48,108 @@ def extract_cpf(file):
         return None, None 
 
 # Obtain PDF 
-def obtain_pdf(driver, wait, period): 
-    try: 
-        # Select December checkbox 
-        checkbox = wait.until(EC.element_to_be_clickable( 
-            (By.CSS_SELECTOR, f'input[name="pa"][value$="{period}"]') 
-        )) 
-        driver.execute_script("arguments[0].click();", checkbox) 
-        print(f"✔️ Checkbox selected for {period}") 
+def obtain_pdf(driver, wait, period, retries=3, delay=2):
+    def try_action(action, description):
+        for attempt in range(retries):
+            try:
+                return action()
+            except Exception as e:
+                print(f"Attempt {attempt+1} failed for {description}: {e}")
+                time.sleep(delay)
+        raise Exception(f"Failed to {description} after {retries} attempts.")
 
-        time.sleep(1) 
+    try:
+        # Select December checkbox
+        def click_checkbox():
+            checkbox = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, f'input[name="pa"][value$="{period}"]')
+            ))
+            driver.execute_script("arguments[0].click();", checkbox)
+            print(f"✔️ Checkbox selected for {period}")
+        try_action(click_checkbox, f"select checkbox for {period}")
 
-        # Click Apurar / DAS button 
-        das_button = wait.until(EC.element_to_be_clickable((By.ID, "btnEmitirDas"))) 
-        driver.execute_script("arguments[0].click();", das_button) 
-        print("✔️ Apurar / DAS button clicked for 2025") 
+        time.sleep(1)
 
-        time.sleep(2) 
+        # Click Apurar / DAS button
+        def click_das():
+            das_button = wait.until(EC.element_to_be_clickable((By.ID, "btnEmitirDas")))
+            driver.execute_script("arguments[0].click();", das_button)
+            print("✔️ Apurar / DAS button clicked")
+        try_action(click_das, "click Apurar / DAS button")
 
-        # Click Imprimir/Visualizar PDF 
-        try: 
-            pdf_link = wait.until(EC.element_to_be_clickable( 
-                (By.XPATH, '//a[contains(@href, "/pgmei.app/emissao/imprimir")]') 
-            )) 
-            driver.execute_script("arguments[0].click();", pdf_link) 
-            print("✔️ PDF print view opened") 
-        except Exception as e: 
-            print(f"❌ Failed to click PDF print button: {e}") 
-    except Exception as e: 
-        print(f"❌ Error obtaining PDF: {e}")       
+        time.sleep(2)
+
+        # Click Imprimir/Visualizar PDF
+        def click_pdf():
+            pdf_link = wait.until(EC.element_to_be_clickable(
+                (By.XPATH, '//a[contains(@href, "/pgmei.app/emissao/imprimir")]')
+            ))
+            driver.execute_script("arguments[0].click();", pdf_link)
+            print("✔️ PDF print view opened")
+        try:
+            try_action(click_pdf, "click PDF print button")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to click PDF print button after retries: {e}")
+
+    except Exception as e:
+        print(f"❌ Error obtaining PDF: {e}")
+        return False 
+def request_pdf(year,pa,session, token_input, data_consolidacao):
+    """
+    Request the PDF for a given CNPJ and year using the session.
+    Returns the PDF content if successful, None otherwise.
+    """
+    
+
+    url = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao/gerarDas"
+    payload = {
+        "ano": year,
+        "pa": pa,
+        "__RequestVerificationToken": token_input,  # Include the token if required
+        "dataConsolidacao": data_consolidacao,  # Include the consolidation date if required
+    }
+    headers = {
+        "Referer": "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/137.0.0.0 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer" :  "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao",
+    }
+
+    try:
+        response = session.post(url, data=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        gerarDas_html = response.text
+        return gerarDas_html  
+
+    except requests.RequestException as e:
+        print(f"Error requesting PDF for  in {year}: {e}")
+        return None
+def get_cpf_from_pdf(cnpj, session):
+    cpf_pattern = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
+    cnpj_pattern = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
+    pdf = session.post("https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao/imprimir")
+    print(pdf.headers.get("Content-Type")) # application/pdf
+    magic = pdf.content[:4]
+    print(magic) # b'%PDF' # PDF magic number
+    pdf_bytes = pdf.content
+    with fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf") as doc:
+        text = ""
+        for page in doc:
+            text += page.get_text()
+    
+    cpf = re.sub(r"\D","",cpf_pattern.findall(text)[0])
+    with open(f"../data/pdfs/das_{cnpj}.pdf", "wb") as f:
+        f.write(pdf.content)
+    obtained_pdf = True
+    return cpf, obtained_pdf
+
 
 # --- Browser/Process Utilities --- 
-def kill_chrome(): 
-    """Kill all Chrome processes.""" 
-    for proc in psutil.process_iter(['pid', 'name']): 
-        if 'chrome' in proc.info['name'].lower(): 
-            try: 
-                proc.kill() 
-            except psutil.NoSuchProcess: 
-                pass 
 def autogui_open_page(chrome_profile_path, url, cnpj, port): 
     try: 
         # ---- Step 1: Start Chrome in remote debug mode ---- 
@@ -118,44 +184,10 @@ def autogui_open_page(chrome_profile_path, url, cnpj, port):
     except Exception as e: 
         print(f"Error opening page with pyautogui: {e}") 
         return False 
-def selenium_open_page_and_login(chrome_profile_path, url, cnpj):
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    import time
-
-    options = Options()
-    options.add_argument(f"--user-data-dir={chrome_profile_path}")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    # options.add_argument("--headless")  # Uncomment for headless mode
-
-    driver = webdriver.Chrome(options=options)
-    wait = WebDriverWait(driver, 10)
-
-    driver.get(url)
-    # Wait for the CNPJ input to be present
-    wait.until(EC.presence_of_element_located((By.NAME, "cnpj")))
-    cnpj_input = driver.find_element(By.NAME, "cnpj")
-    cnpj_input.clear()
-    cnpj_input.send_keys(cnpj)
-
-    # Wait for the "Continuar" button to be enabled and click it
-    continuar_btn = wait.until(EC.element_to_be_clickable((By.ID, "continuar")))
-    continuar_btn.click()
-
-    # Wait for navigation or next page to load as needed
-    time.sleep(2)
-    return driver, wait
 def selenium_open_page(url_inside,port): 
 
     # Selenium setup 
-    options = Options() 
+    options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}") 
     driver = webdriver.Chrome(options=options) 
     wait = WebDriverWait(driver, 3) 
@@ -176,10 +208,12 @@ def remove_chrome_profile_dir(path, retries=0, delay=2):
             time.sleep(delay)
         if e is not None: 
             print(f"Failed to remove {path} after {retries} attempts: {e}") 
+def is_port_available(port, host='127.0.0.1'):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((host, port)) != 0
 
 # --- Scraping Utilities --- 
-def cnpj_check(driver, cnpj): 
-    soup = BeautifulSoup(driver.page_source, 'html.parser') 
+def cnpj_check(cnpj,soup): 
     cnpj_check = re.sub(r'\D','',soup.find("li", class_="list-group-item").get_text(strip=True).split("Nome")[0]) 
     # compare the cnpj found on the page with the one we are looking for 
     print(f"cnpj_check: {cnpj_check}") 
@@ -226,10 +260,10 @@ def scrape_data(cnpj, year, soup, table):
         if quota_split: #If we have a table with a quotas column 
         
             # Check if each row  has quotas that require a split 
-            quota_row = any( 
-                inp.get("data-pa-quota") == "true" 
-                for inp in row.find_all("input", attrs={"data-pa-quota": True}) 
-            ) 
+            quota_row = any(
+                inp.has_attr("checked")
+                for inp in row.find_all("input", class_="quotasSelecionado", attrs={"data-pa-quota": "true"})
+            )
 
             if quota_row: 
                 # First 4 cells: Período, Apurado, Benefício, Quotas (set to 1) 
@@ -261,10 +295,11 @@ def scrape_data(cnpj, year, soup, table):
             i += 1 
 
     
-    # Step 4: Build DataFrame 
+    # Step 4: Build DataFrame
+    #print(f"Cleaned data : {cleaned_data}")
     df = pd.DataFrame(cleaned_data, columns=cols) 
     df['cnpj'] = cnpj 
-    df['data_found'] = True 
+    df['data_found'] = "Yes"
 
     return df 
 def debt_collector(soup): 
@@ -274,12 +309,13 @@ def debt_collector(soup):
     if attention_text: 
         return True 
     return False 
-def outstanding_payment(data): 
+def outstanding_payment(data, year): 
     mask = data['Total'].astype(str).str.strip().ne("-") 
     if mask.any(): 
+        print("finding first month with outstanding payment")
         first = mask.idxmax() 
         month = first + 1 
-        return f"{month:02d}" 
+        return f"{year}{month:02d}" 
     return None 
 def scrape_debt_table(cnpj, soup): 
     all_rows = [] 
@@ -313,9 +349,10 @@ def scrape_debt_table(cnpj, soup):
 def get_enabled_years_bootstrap(wait, cnpj): 
     """ 
     Try to get enabled years from a Bootstrap-styled dropdown. 
-    Returns (enabled_years, use_bootstrap). 
+    Returns (enabled_years, opt_out_years,use_bootstrap). 
     Raises if not found. 
-    """ 
+    """
+    print("Waiting for buttom to be available")
     dropdown_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[data-id="anoCalendarioSelect"]'))) 
     dropdown_button.click() 
     time.sleep(1) 
@@ -323,40 +360,107 @@ def get_enabled_years_bootstrap(wait, cnpj):
     year_elements = wait.until(EC.presence_of_all_elements_located( 
         (By.CSS_SELECTOR, ".dropdown-menu.inner li a span.text") 
     )) 
-    enabled_years = [el.text.strip() for el in year_elements if el.text.strip()] 
-    enabled_years = [year for year in enabled_years if "Não optante" not in year] 
+    drop_down_years = [el.text.strip() for el in year_elements if el.text.strip() and el.get_attribute("class") != "disabled"] 
+    enabled_years = [year for year in drop_down_years if "Não optante" not in year]
+    opt_out_years = [re.search(r"\d{4}", year).group() for year in drop_down_years if "Não optante" in year] 
 
     if not enabled_years: 
         raise ValueError("No enabled years found in the dropdown menu.") 
 
     print("Bootstrap dropdown enabled years for CNPJ ", cnpj , ":", enabled_years) 
-    return enabled_years, True 
+    return enabled_years, opt_out_years, True 
 def get_enabled_years_native(wait, cnpj, driver): 
     """ 
     Get enabled years from a native <select> dropdown. 
-    Returns (enabled_years, use_bootstrap). 
+    Returns (enabled_years, opt_out_years, use_bootstrap). 
     """ 
     select_element = wait.until(EC.presence_of_element_located((By.ID, "anoCalendarioSelect"))) 
     dropdown = Select(select_element) 
-    enabled_years = [o.text.strip() for o in dropdown.options if o.text.strip()] 
-    enabled_years = [year for year in enabled_years if "Não optante" not in year] 
+    drop_down_years = [o.text.strip() for o in dropdown.options if o.text.strip()] 
+    enabled_years = [year for year in drop_down_years if "Não optante" not in year]
+    opt_out_years = [re.search(r"\d{4}", year).group() for year in drop_down_years if "Não optante" in year]
     print("Native <select> enabled years for CNPJ ", cnpj,":", enabled_years) 
-    return enabled_years, False 
-def select_year_bootstrap(wait, driver, year): 
-    dropdown_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-id="anoCalendarioSelect"]'))) 
-    driver.execute_script("arguments[0].click();", dropdown_button) 
-    time.sleep(1.5) 
-    print("Clicking on year:", year) 
-    year_option = wait.until(EC.element_to_be_clickable( 
-        (By.XPATH, f"//span[@class='text' and normalize-space(text())='{year}']") 
-    )) 
-    time.sleep(2) 
-    driver.execute_script("arguments[0].click();", year_option) 
-    print(f"Selected (Bootstrap) year: {year}") 
-def select_year_native(driver, year): 
-    dropdown = Select(driver.find_element(By.ID, "anoCalendarioSelect")) 
-    dropdown.select_by_visible_text(year) 
-    print(f"Selected (native) year: {year}") 
+    return enabled_years, opt_out_years, False 
+
+    for attempt in range(retries):
+        try:
+            dropdown = Select(wait.until(
+                EC.presence_of_element_located((By.ID, "anoCalendarioSelect"))
+            ))
+            dropdown.select_by_visible_text(year)
+            print(f"Selected (native) year: {year}")
+            time.sleep(0.5)
+            # Click OK/Submit button if needed
+            ok_button = wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+            )
+            ok_button.click()
+            # ok_button.send_keys(Keys.ENTER)
+            time.sleep(2)
+            return  # Success
+        except (TimeoutException, ElementClickInterceptedException, NoSuchElementException) as e:
+            print(f"Attempt {attempt+1} failed to select year {year} (Native): {e}")
+            time.sleep(delay)
+    raise Exception(f"Failed to select year {year} (Native) after {retries} attempts.")
+def get_years(soup):
+    enabled_years = []
+    opt_out_years = []
+
+    select = soup.find("select", {"id": "anoCalendarioSelect"})
+    #print(select)
+    if select:
+        for option in select.find_all("option"):
+            if option.get("value") == "":
+                continue
+        # Exclude disabled options (Não optante)
+            if option.has_attr("disabled"):
+                opt_out_years.append(option.text.strip())
+                continue
+            enabled_years.append(option.text.strip())
+
+    return enabled_years, opt_out_years
+def make_requests_session_from_selenium(driver):
+    """
+    Given a Selenium WebDriver that’s already logged in (and has
+    solved any CAPTCHA), extract its cookies into a requests.Session.
+    """
+    sess = requests.Session()
+    for ck in driver.get_cookies():
+        # Copy each cookie from Selenium into requests
+        sess.cookies.set(
+            name   = ck['name'],
+            value  = ck['value'],
+            domain = ck.get('domain'),
+            path   = ck.get('path', '/')
+        )
+    return sess
+def fetch_emissao_html(year: str, session: requests.Session) -> str:
+    """
+    Given a logged-in session, POST directly to the /emissao endpoint
+    and return the HTML response.
+    """
+    
+
+    url = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao"
+    payload = {
+        "ano": year,
+        # Include any other hidden form fields you saw (tokens, etc.)
+        # "__RequestVerificationToken": session.cookies.get("…"),  # if needed
+    }
+    headers = {
+        "Referer":    "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/114.0.5735.199 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer" :  "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao", 
+    }
+
+    resp = session.post(url, data=payload, headers=headers, timeout=30)
+    resp.raise_for_status()  # explode on HTTP errors
+    return resp.text
 
 # --- DataFrame and Data Handling ---   
 def handle_missing_table(cnpj, year, enabled_years, index, data, master_df): 
@@ -371,7 +475,7 @@ def handle_missing_table(cnpj, year, enabled_years, index, data, master_df):
         data.append({ 
             'cnpj': cnpj, 
             'Período de Apuração': remaining_year, 
-            'data_found': False 
+            'data_found': "Table not found" 
         }) 
     missing_df = pd.DataFrame(data) 
     master_df = pd.concat([master_df, missing_df], ignore_index=True) 
@@ -405,67 +509,110 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
     timings = [] 
     total_start_time = time.time() 
     master_df = pd.DataFrame() 
-    master_debt_df = pd.DataFrame() 
+    master_debt_df = pd.DataFrame()
+    cnpj_cpf_map = pd.DataFrame(columns=["cnpj", "cpf"])
 
     #for cnpj in cnpj_batch: 
     try: 
         start_time = time.time() 
         data = [] 
+        
+        # Open page and add cookies to selenium
+        driver, wait = selenium_open_page(url_inside,port)
+        session = make_requests_session_from_selenium(driver)
+        
+        soup1 = BeautifulSoup(driver.page_source, 'html.parser') 
+        cnpj_check(cnpj,soup1) # check cnpj being searched matches the one on the webpage
+        enabled_years, opt_out_years = get_years(soup1) # obtain years
 
+        print("scraping years", enabled_years)
+        print("opt_out_years", opt_out_years)
 
-        #autogui_open_page(chrome_profile_path, url, cnpj) 
-        #selenium_open_page_and_login(chrome_profile_path, url, cnpj)
-        driver, wait = selenium_open_page(url_inside,port) 
-
-        cnpj_check(driver, cnpj) 
-
-        try: 
-            enabled_years, use_bootstrap = get_enabled_years_bootstrap(wait, cnpj) 
-        except Exception: 
-            print("Bootstrap dropdown failed, falling back to native <select> method.") 
-            enabled_years, use_bootstrap = get_enabled_years_native(wait, cnpj, driver) 
-
-        # include only max of enabled years
-        enabled_years = [max(enabled_years)] 
-        print("scraping years", enabled_years) 
-        enabled_years.insert(0, "2010") 
-
-        obtained_pdf = 0 
+        obtained_pdf = False
         for index, year in enumerate(enabled_years): 
             try: 
-                if use_bootstrap: 
-                    select_year_bootstrap(wait, driver, year) 
-                else: 
-                    select_year_native(driver, year) 
 
-                ok_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']") 
-                ok_button.click() 
-                time.sleep(2) 
+                html = fetch_emissao_html(year, session) # Get table html    
 
-                soup = BeautifulSoup(driver.page_source, 'html.parser') 
-                table = soup.find('table', class_='table table-hover table-condensed emissao is-detailed') 
-                if not table: 
+                time.sleep(2)
+                soup = BeautifulSoup(html, 'html.parser')
+                # Export soup to a text file with CNPJ in the filename
+                os.makedirs("html", exist_ok=True)
+                with open(f"html/soup_{cnpj}_{year}.html", "w", encoding="utf-8") as f:
+                    f.write(str(soup))
+                table = soup.find('table', class_=[
+                    'table', 'table-hover', 'table-condensed', 'emissao', 'is-detailed'
+                ])
+
+                # Get verification token and data cons for the Payload if we don't have the pdf
+                if obtained_pdf == False:
+                    try:
+                        token_input = soup.find('input', {'name': '__RequestVerificationToken'})
+                        if token_input:
+                            token_input = token_input.get('value', None)
+                        else:
+                            token_input = None
+                    except Exception as e:
+                        token_input = None
+                        print(f"__RequestVerificationToken not found for {cnpj} in year {year}: {e}")
+                
+                    # Get data consolidacao
+                    try:
+                        data_consolidacao = soup.find('input', {'name': 'dataConsolidacao'})['value']
+                    except Exception as e:
+                        data_consolidacao = None
+                        print(f"dataConsolidacao not found for {cnpj} in year {year}: {e}")
+
+                #print(table)
+                if table is not None:
+                    print(f"{cnpj} - Table found for {year}")
+                if not table:
                     master_df = handle_missing_table(cnpj, year, enabled_years, index, data, master_df) 
                     break 
+                
+                # Check if the page indicates debt collection
+                is_debt_collector = debt_collector(soup)
+                print(f"{cnpj} scraping main table for {year}")
 
-                is_debt_collector = debt_collector(soup) 
+                # Scrape the main table
                 new_data = scrape_data(cnpj, year, soup, table) 
                 master_df = pd.concat([master_df, new_data], ignore_index=True) 
-
+            
+                # Scrape the debt collection table if applicable
                 if is_debt_collector: 
                     print(f"Debt collection table found in year {year}.") 
                     debt_data = scrape_debt_table(cnpj, soup) 
                     master_debt_df = pd.concat([master_debt_df, debt_data], ignore_index=True) 
 
-                outstanding_payments = outstanding_payment(new_data) 
+                print(f"Type of year: {type(year)}, value: {year}")
+                # Check for outstanding payments
+                pa = outstanding_payment(new_data, year)
+                if pa:
+                    print(f"Outstanding payment found for {cnpj} in year {year}: {pa}")
+                else:
+                    print(f"No outstanding payments found for {cnpj} in year {year}")
 
-                if not is_debt_collector and outstanding_payments and not obtained_pdf: 
-                    print(f"Outstanding payments found in year {year}, period {outstanding_payments}, attempting to obtain PDF.") 
-                    obtain_pdf(driver, wait, outstanding_payments) 
-                    driver.back() 
-                    obtained_pdf = 1 
+                if not is_debt_collector and pa and not obtained_pdf: 
+                    print(f"Outstanding payments found in year {year}, period {pa}, attempting to obtain PDF.") 
+                    try:
+                        print("requesting pdf")
+                        request_pdf(year, pa, session, token_input, data_consolidacao)
+                        
+                        print("obtaining cpf from pdf")
+                        cpf, obtained_pdf = get_cpf_from_pdf(cnpj, session)
+                        print(f"Obtained CPF: {cpf}")
+                        # create dataframe with cnpj and cpf
+                        if cpf and not (cnpj_cpf_map['cnpj'] == cnpj).any():
+                            cnpj_cpf_map = pd.concat(
+                                [cnpj_cpf_map, pd.DataFrame([{"cnpj": cnpj, "cpf": cpf}])],
+                                ignore_index=True
+                            )
+                    except Exception as e:
+                        print(f"Error obtaining PDF for {cnpj} in year {year}: {e}")
 
-                driver.back() 
+                
+                #driver.back()
+                print("back button clicked")
                 time.sleep(2) 
 
             except Exception as e: 
@@ -480,13 +627,29 @@ def process_cnpj_batch(chrome_profile_path, cnpj, port):
             driver.quit() 
         except: 
             pass 
-        #kill_chrome() 
+        
         timings_report(start_time, total_start_time, timings) 
+   
+    # Add indicator in data_found for nao optante years
+    if opt_out_years:
+        nao_optante_df = pd.DataFrame([{
+            'cnpj': cnpj,
+            'Período de Apuração': year,
+            'data_found': "Nao optante"
+        } for year in opt_out_years])
+        master_df = pd.concat([master_df, nao_optante_df], ignore_index=True)
 
-    print("removing chrome profile directory...")
-    remove_chrome_profile_dir(chrome_profile_path) 
+    # Add a column to master_df indicating if bootstrap was used
+    master_df['obtained_pdf'] =  obtained_pdf
 
-def store_data(master_df, master_debt_df):
+    print(f"removing chrome profile directory: {chrome_profile_path}")
+    remove_chrome_profile_dir(chrome_profile_path)
+    print("returning datasets")
+    print(f"cnpj_cpf_map: {cnpj_cpf_map} ")
+
+    return master_df, master_debt_df, cnpj_cpf_map
+
+def store_data(master_df, master_debt_df, master_mapping):
     # Export dataframes to CSV (optionally, use a unique name per batch) 
     if 'Quotas' in master_df.columns:
         master_df['Quotas'] = master_df['Quotas'].fillna(0).astype(int) 
@@ -502,7 +665,8 @@ def store_data(master_df, master_debt_df):
     columns = [
         'cnpj', 'Período de Apuração', 'year', 'month', 'Apurado', 'Situação', 'Benefício INSS',
         'Principal', 'Multa', 'Juros', 'Total',
-        'Data de Vencimento', 'Data de Acolhimento', 'data_found'
+        'Data de Vencimento', 'Data de Acolhimento', 'data_found', "used_bootstrap", "worker_id_port",
+        "obtained_pdf"
     ]
     if 'Quotas' in master_df.columns:
         columns.insert(7, 'Quotas')  # Insert 'Quotas' after 'Benefício INSS'
@@ -512,58 +676,8 @@ def store_data(master_df, master_debt_df):
 
     # Save with a unique name per batch (e.g., using time or batch id) 
     batch_id = int(time.time()) 
-    master_df.to_csv(f'../data/master_df_{batch_id}.csv', index=False, encoding='utf-8') 
-    master_debt_df.to_csv(f'../data/master_debt_df_{batch_id}.csv', index=False, encoding='utf-8') 
-    print(f"Batch data exported to ../data/master_df_{batch_id}.csv and ../data/master_debt_df_{batch_id}.csv") 
+    master_df.to_csv(f'../data/out/master_df_{batch_id}.csv', index=False, encoding='utf-8') 
+    master_debt_df.to_csv(f'../data/out/master_debt_df_{batch_id}.csv', index=False, encoding='utf-8') 
+    master_mapping.to_csv(f'../data/out/master_mapping_{batch_id}.csv', index=False, encoding='utf-8')
+    print(f"Batch data exported to ../data/master_df_{batch_id}.csv & ../data/master_debt_df_{batch_id}.csv & ../data/master_mapping_{batch_id}.csv") 
 
-
-def process_cnpj_batch_playwright(cnpj_batch):
-    import pandas as pd
-    import time
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import stealth_sync
-
-    url = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/Identificacao"
-    url_inside = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/emissao"
-    timings = []
-    total_start_time = time.time()
-    master_df = pd.DataFrame()
-    master_debt_df = pd.DataFrame()
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # Set to True for headless
-        context = browser.new_context()
-        stealth_sync(context)
-        page = context.new_page()
-
-        for cnpj in cnpj_batch: 
-            start_time = time.time()
-            data = []
-
-            # Step 1: Go to the main page and enter CNPJ
-            page.goto(url)
-            page.wait_for_selector('input[name="cnpj"]', timeout=10000)
-            page.fill('input[name="cnpj"]', cnpj)
-            page.click('button[type="submit"]')
-            time.sleep(2)
-            print(page.content())
-            page.wait_for_url(url_inside, timeout=15000)
-            time.sleep(2)
-            print(page.content())
-
-            # Step 2: Now on the inside page
-            # Get enabled years (try bootstrap first, then fallback)
-            try:
-                page.wait_for_selector('button[data-id="anoCalendarioSelect"]', timeout=5000)
-                page.click('button[data-id="anoCalendarioSelect"]')
-                time.sleep(1)
-                year_elements = page.query_selector_all(".dropdown-menu.inner li a span.text")
-                enabled_years = [el.inner_text().strip() for el in year_elements if el.inner_text().strip()]
-                enabled_years = [year for year in enabled_years if "Não optante" not in year]
-                use_bootstrap = True
-            except Exception:
-                select = page.query_selector("#anoCalendarioSelect")
-                enabled_years = [option.inner_text().strip() for option in select.query_selector_all("option") if option.inner_text().strip()]
-                enabled_years = [year for year in enabled_years if "Não optante" not in year]
-                use_bootstrap = False
-                

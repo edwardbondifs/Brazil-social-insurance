@@ -3,3 +3,7 @@
 *.pdf
 *.xlsx
 *.pyc
+*.mp4
+*.txt
+*.ipynb
+*test*

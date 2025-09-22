@@ -164,7 +164,7 @@ def autogui_open_page(chrome_profile_path, url, cnpj, port):
             "--no-first-run", 
             "--no-default-browser-check" 
         ]) 
-        time.sleep(2)  # Give Chrome time to launch 
+        time.sleep(3)  # Give Chrome time to launch 
 
         # ---- Step 2: Use pyautogui to interact with the site ---- 
         pyautogui.hotkey('ctrl', 'l') 
@@ -191,6 +191,11 @@ def selenium_open_page(url_inside,port):
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}") 
     driver = webdriver.Chrome(options=options) 
     wait = WebDriverWait(driver, 3) 
+
+    try:
+        print("Chromedriver version:", driver.capabilities['chrome']['chromedriverVersion'])
+    except Exception as e:
+        print(f"Could not get Chromedriver version: {e}")
 
     driver.get(url_inside) 
     time.sleep(1.5) 

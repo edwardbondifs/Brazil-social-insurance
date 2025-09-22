@@ -60,7 +60,9 @@ from utils import *
 log_dir = "../data/log"
 log_file = open(os.path.join(log_dir, 'output.txt'), 'w', encoding='utf-8')
 sys.stdout = Tee(sys.__stdout__, log_file)
-number_cnpjs = 500
+number_cnpjs = 6
+workers = 1
+batch_size = 1
 
 def worker(args):
     try:
@@ -125,28 +127,28 @@ def main():
 
     # Load in MEI numbers
     print("Starting MEI Scraper...")
-    cnpj_merged = pd.read_csv('../data/in/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=number_cnpjs)
+    cnpj_merged = pd.read_csv('../data/in/MEI_numbers.csv', sep=',', encoding='utf-8', nrows=number_cnpjs, header = None, names=['cnpj'])
 
     # Create list of CNPJ numbers to process
-    cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:number_cnpjs].to_list()  # Use more for a real test
-    # cnpj_list.extend([
-    # "40463732000132", 
-    # "40710174000162",
-    # "41084097000145",   
-    # "41199048000158",
-    # "41892941000164",
-    # "42010591000128",
-    # "42050465000105",
-    # "42729441000179",
-    # "43531252000150",
-    # "43654121000160",
-    # "43691045000162"
-    # ])
+    #cnpj_list = cnpj_merged['cnpj'].astype(str).iloc[0:number_cnpjs].to_list()  # Use more for a real test
+    cnpj_list = []
+    cnpj_list.extend([
+    "40463732000132", 
+    "40710174000162",
+    "41084097000145",
+    "41892941000164",
+    "42010591000128",
+    "42050465000105",
+    "42729441000179",
+    "43531252000150",
+    "43654121000160",
+    "43691045000162"
+    ])
 
     print(f"Total CNPJ numbers to process: {len(cnpj_list)}")
     print("CNPJ List:", cnpj_list)
 
-    batch_size = 50
+   
     batches = list(batch_cnpjs(cnpj_list, batch_size))
     manager = Manager()
     lock = manager.Lock()
@@ -154,7 +156,7 @@ def main():
     args = [(batch, i, lock) for i, batch in enumerate(batches)]
 
     #combines all batches together
-    with Pool(10) as p:
+    with Pool(workers) as p:
         results = p.map(worker, args)
         #print(f"results:{results}")
     for df, debt_df, df_map in results:
